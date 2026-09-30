@@ -4,6 +4,12 @@ build/win-unpacked/
 build/win-ia32-unpacked/
 build/Genshin Gacha Export Setup 0.2.4.exe
 build/Genshin Gacha Export Setup 0.2.4.exe.blockmap
+build/*.exe
+build/*.exe.blockmap
+build/mac-*/
+build/*.dmg
+build/*.dmg.blockmap
+build/latest-mac.yml
 build/*.zip
 build/update/
 build/builder-debug.yml

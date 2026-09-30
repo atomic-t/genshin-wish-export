@@ -145,10 +145,186 @@ const detectGameType = async (userPath) => {
   return list
 }
 
+const normalizeWinePath = (winePath, wineprefix) => {
+  let p = winePath.replace(/\\/g, '/')
+  if (/^[zZ]:/i.test(p)) {
+    return p.substring(2)
+  }
+  if (/^[a-zA-Z]:/.test(p) && wineprefix) {
+    const drive = p[0].toLowerCase()
+    return path.join(wineprefix, `drive_${drive}`, p.substring(2))
+  }
+  return p
+}
+
+const findMacWineGenshin = () => {
+  const candidates = []
+  const home = app.getPath('home')
+  const appSupport = path.join(home, 'Library/Application Support')
+
+  // 1. Collect Wineprefixes across all common macOS Wine runners
+  const wineprefixes = []
+
+  // Yaagl directories
+  const yaaglDirs = []
+  if (process.env.YAAGL_DIR && fs.existsSync(process.env.YAAGL_DIR)) {
+    yaaglDirs.push({ name: 'YAAGL_DIR', dir: process.env.YAAGL_DIR })
+  }
+  if (fs.existsSync(appSupport)) {
+    try {
+      const entries = fs.readdirSync(appSupport)
+      for (const name of entries) {
+        if (name.toLowerCase().startsWith('yaagl')) {
+          yaaglDirs.push({ name, dir: path.join(appSupport, name) })
+        }
+      }
+    } catch (e) {}
+  }
+  for (const { name, dir } of yaaglDirs) {
+    const wineprefix = path.join(dir, 'wineprefix')
+    if (fs.existsSync(wineprefix)) {
+      wineprefixes.push({ source: `Yaagl (${name})`, wineprefix })
+    }
+    // Check Yaagl .storage/game_install_dir.neustorage directly
+    const storageDir = path.join(dir, '.storage')
+    const gameInstallDirFile = path.join(storageDir, 'game_install_dir.neustorage')
+    if (fs.existsSync(gameInstallDirFile)) {
+      try {
+        const gameDir = fs.readFileSync(gameInstallDirFile, 'utf8').trim()
+        for (const dataName of ['GenshinImpact_Data', 'YuanShen_Data']) {
+          const dataDir = path.join(gameDir, dataName)
+          if (fs.existsSync(dataDir)) {
+            candidates.push({ source: `Yaagl storage (${name})`, dataDir, wineprefix })
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Custom WINEPREFIX environment variable
+  if (process.env.WINEPREFIX && fs.existsSync(process.env.WINEPREFIX)) {
+    wineprefixes.push({ source: 'env WINEPREFIX', wineprefix: process.env.WINEPREFIX })
+  }
+
+  // Standard ~/.wine
+  const defaultWine = path.join(home, '.wine')
+  if (fs.existsSync(defaultWine)) {
+    wineprefixes.push({ source: 'Default ~/.wine', wineprefix: defaultWine })
+  }
+
+  // Whisky bottles
+  const whiskyDirs = [
+    path.join(appSupport, 'com.isaacmarovitz.Whisky/Bottles'),
+    path.join(home, 'Library/Containers/com.isaacmarovitz.Whisky/Data/Library/Application Support/com.isaacmarovitz.Whisky/Bottles')
+  ]
+  for (const wDir of whiskyDirs) {
+    if (fs.existsSync(wDir)) {
+      try {
+        for (const b of fs.readdirSync(wDir)) {
+          const bottleDir = path.join(wDir, b)
+          if (fs.existsSync(path.join(bottleDir, 'drive_c'))) {
+            wineprefixes.push({ source: `Whisky (${b})`, wineprefix: bottleDir })
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // CrossOver bottles
+  const crossoverDir = path.join(appSupport, 'CrossOver/Bottles')
+  if (fs.existsSync(crossoverDir)) {
+    try {
+      for (const b of fs.readdirSync(crossoverDir)) {
+        const bottleDir = path.join(crossoverDir, b)
+        if (fs.existsSync(path.join(bottleDir, 'drive_c'))) {
+          wineprefixes.push({ source: `CrossOver (${b})`, wineprefix: bottleDir })
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Heroic Games Launcher prefixes
+  const heroicDir = path.join(home, 'Games/Heroic/Prefixes')
+  if (fs.existsSync(heroicDir)) {
+    try {
+      for (const b of fs.readdirSync(heroicDir)) {
+        const pfxDir = path.join(heroicDir, b)
+        if (fs.existsSync(path.join(pfxDir, 'drive_c'))) {
+          wineprefixes.push({ source: `Heroic (${b})`, wineprefix: pfxDir })
+        }
+      }
+    } catch (e) {}
+  }
+
+  // PlayOnMac prefixes
+  const pomDir = path.join(home, 'Library/PlayOnMac/wineprefix')
+  if (fs.existsSync(pomDir)) {
+    try {
+      for (const b of fs.readdirSync(pomDir)) {
+        const pfxDir = path.join(pomDir, b)
+        if (fs.existsSync(path.join(pfxDir, 'drive_c'))) {
+          wineprefixes.push({ source: `PlayOnMac (${b})`, wineprefix: pfxDir })
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 2. Scan output_log.txt across all discovered wineprefixes
+  for (const { source, wineprefix } of wineprefixes) {
+    const usersDir = path.join(wineprefix, 'drive_c/users')
+    if (fs.existsSync(usersDir)) {
+      try {
+        for (const user of fs.readdirSync(usersDir)) {
+          if (user === 'Public') continue
+          for (const gameName of ['Genshin Impact', '原神']) {
+            const logFile = path.join(usersDir, user, 'AppData/LocalLow/miHoYo', gameName, 'output_log.txt')
+            if (fs.existsSync(logFile)) {
+              try {
+                const logText = fs.readFileSync(logFile, 'utf8')
+                const mch = logText.match(/(?:[a-zA-Z]:[\\\/]|\/)[^\r\n"'()]+?(?:GenshinImpact_Data|YuanShen_Data)/)
+                if (mch) {
+                  const normalized = normalizeWinePath(mch[0], wineprefix)
+                  if (fs.existsSync(normalized)) {
+                    candidates.push({ source: `${source} output_log.txt`, dataDir: normalized, wineprefix, logFile })
+                  }
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  const unique = []
+  const seen = new Set()
+  for (const c of candidates) {
+    if (!seen.has(c.dataDir)) {
+      seen.add(c.dataDir)
+      unique.push(c)
+    }
+  }
+  return unique
+}
+
 let cacheFolder = null
 const readLog = async () => {
   const text = i18n.log
   try {
+    if (process.platform === 'darwin') {
+      const wineTargets = findMacWineGenshin()
+      for (const target of wineTargets) {
+        try {
+          const [cacheText, cacheFile] = await getCacheText(target.dataDir)
+          const urlMch = cacheText.match(/https.+?auth_appid=webview_gacha.+?authkey=.+?game_biz=hk4e_\w+/g)
+          if (urlMch) {
+            cacheFolder = cacheFile.replace(/Cache_Data[/\\]data_2$/, '')
+            return urlMch[urlMch.length - 1]
+          }
+        } catch (e) {}
+      }
+    }
+
     let userPath
     if (!process.env.WINEPREFIX) {
       userPath = app.getPath('home')
@@ -520,3 +696,7 @@ exports.getData = () => {
 exports.saveData = saveData
 
 exports.changeCurrent = changeCurrent
+
+exports.readLog = readLog
+
+exports.getUrl = getUrl

@@ -14,7 +14,9 @@ const readdir = util.promisify(fs.readdir)
 const isDev = !app.isPackaged
 
 const appRoot = isDev ? path.resolve(__dirname, '..', '..') : path.resolve(app.getAppPath(), '..', '..')
-const userDataPath = path.resolve(appRoot, 'userData')
+const userDataPath = process.platform === 'darwin'
+  ? (isDev ? path.resolve(appRoot, 'userData') : path.join(app.getPath('userData'), 'userData'))
+  : path.resolve(appRoot, 'userData')
 const userPath = app.getPath('userData')
 
 let win = null
@@ -230,18 +232,49 @@ const localIp = () => {
 }
 
 async function getCacheText(gamePath) {
-  const results = await glob(path.join(gamePath, '/webCaches{/,/*/}Cache/Cache_Data/data_2'), {
-    stat: true,
-		withFileTypes: true,
-    nodir: true,
-    windowsPathsNoEscape: true
-  })
-  const timeSortedFiles = results
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)
-    .map(path => path.fullpath())
-  const cacheText = await fs.readFile(path.join(timeSortedFiles[0]), 'utf8')
+  let timeSortedFiles = []
+  try {
+    const results = await glob(path.join(gamePath, 'webCaches{/,/*/}Cache/Cache_Data/data_2'), {
+      stat: true,
+      withFileTypes: true,
+      nodir: true,
+      windowsPathsNoEscape: true
+    })
+    timeSortedFiles = results
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .map(p => (p && typeof p.fullpath === 'function') ? p.fullpath() : p)
+  } catch (e) {}
 
-  return [cacheText, timeSortedFiles[0]]
+  if (!timeSortedFiles.length) {
+    const webCaches = path.join(gamePath, 'webCaches')
+    if (fs.existsSync(webCaches)) {
+      const candidates = []
+      const oldFile = path.join(webCaches, 'Cache/Cache_Data/data_2')
+      if (fs.existsSync(oldFile)) {
+        candidates.push({ file: oldFile, mtime: fs.statSync(oldFile).mtimeMs })
+      }
+      try {
+        const subs = fs.readdirSync(webCaches)
+        for (const sub of subs) {
+          const candidate = path.join(webCaches, sub, 'Cache/Cache_Data/data_2')
+          if (fs.existsSync(candidate)) {
+            candidates.push({ file: candidate, mtime: fs.statSync(candidate).mtimeMs })
+          }
+        }
+      } catch (err) {}
+      candidates.sort((a, b) => b.mtime - a.mtime)
+      timeSortedFiles = candidates.map(c => c.file)
+    }
+  }
+
+  if (!timeSortedFiles.length) {
+    throw new Error('Cache file not found in ' + gamePath)
+  }
+
+  const cacheFile = typeof timeSortedFiles[0] === 'string' ? timeSortedFiles[0] : (timeSortedFiles[0].fullpath ? timeSortedFiles[0].fullpath() : String(timeSortedFiles[0]))
+  const cacheText = await fs.readFile(cacheFile, 'utf8')
+
+  return [cacheText, cacheFile]
 }
 
 const mapToObject = (map) => {

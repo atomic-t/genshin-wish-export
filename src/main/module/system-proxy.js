@@ -1,9 +1,73 @@
-const Registry = require('winreg')
+const { execSync } = require('child_process')
+let Registry = null
+if (process.platform === 'win32') {
+  try {
+    Registry = require('winreg')
+  } catch (e) {}
+}
 
 const proxyStatus = {
   started: false
 }
+
+const getMacActiveService = () => {
+  try {
+    const out = execSync('networksetup -listnetworkserviceorder', { encoding: 'utf8' })
+    const lines = out.split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(/^\(\d+\)\s+(.+)$/)
+      if (match) {
+        const service = match[1]
+        const nextLine = lines[i + 1] || ''
+        const devMatch = nextLine.match(/Device:\s*(\w+)/)
+        if (devMatch) {
+          const dev = devMatch[1]
+          try {
+            const status = execSync(`ifconfig ${dev}`, { encoding: 'utf8' })
+            if (status.includes('status: active') || status.includes('inet ')) {
+              return service
+            }
+          } catch (e) {}
+        }
+      }
+    }
+  } catch (e) {}
+  return 'Wi-Fi'
+}
+
+let activeMacService = null
+
+const setMacProxy = async (enable, ip = '127.0.0.1', port = '8345') => {
+  try {
+    if (!activeMacService) {
+      activeMacService = getMacActiveService()
+    }
+    const service = activeMacService
+    if (enable) {
+      execSync(`networksetup -setwebproxy "${service}" ${ip} ${port}`)
+      execSync(`networksetup -setsecurewebproxy "${service}" ${ip} ${port}`)
+    } else {
+      execSync(`networksetup -setwebproxystate "${service}" off`)
+      execSync(`networksetup -setsecurewebproxystate "${service}" off`)
+    }
+  } catch (e) {
+    console.error('macOS proxy config error:', e)
+  }
+}
+
 const setProxy = async (enable, proxyIp = '', ignoreIp = '') => {
+  if (process.platform === 'darwin') {
+    if (enable === '1') {
+      const [ip, port] = proxyIp.split(':')
+      await setMacProxy(true, ip, port)
+    } else {
+      await setMacProxy(false)
+    }
+    return
+  }
+
+  if (!Registry) return
+
   const regKey = new Registry({
     hive: Registry.HKCU,
     key:  '\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
